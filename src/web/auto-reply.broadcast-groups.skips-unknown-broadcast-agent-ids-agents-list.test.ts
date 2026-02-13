@@ -13,8 +13,8 @@ vi.mock("../agents/pi-embedded.js", () => ({
   resolveEmbeddedSessionLane: (key: string) => `session:${key.trim() || "main"}`,
 }));
 
+import type { OpenClawConfig } from "../config/config.js";
 import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
-import type { ClawdbotConfig } from "../config/config.js";
 import { monitorWebChannel } from "./auto-reply.js";
 import { resetLoadConfigMock, setLoadConfigMock } from "./test-helpers.js";
 
@@ -33,7 +33,7 @@ const rmDirWithRetries = async (dir: string): Promise<void> => {
           ? String((err as { code?: unknown }).code)
           : null;
       if (code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") {
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        await new Promise((resolve) => setTimeout(resolve, 5));
         continue;
       }
       throw err;
@@ -46,7 +46,7 @@ const rmDirWithRetries = async (dir: string): Promise<void> => {
 beforeEach(async () => {
   resetInboundDedupe();
   previousHome = process.env.HOME;
-  tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-web-home-"));
+  tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-web-home-"));
   process.env.HOME = tempHome;
 });
 
@@ -61,7 +61,7 @@ afterEach(async () => {
 const _makeSessionStore = async (
   entries: Record<string, unknown> = {},
 ): Promise<{ storePath: string; cleanup: () => Promise<void> }> => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-session-"));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-"));
   const storePath = path.join(dir, "sessions.json");
   await fs.writeFile(storePath, JSON.stringify(entries));
   const cleanup = async () => {
@@ -77,7 +77,7 @@ const _makeSessionStore = async (
             ? String((err as { code?: unknown }).code)
             : null;
         if (code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") {
-          await new Promise((resolve) => setTimeout(resolve, 25));
+          await new Promise((resolve) => setTimeout(resolve, 5));
           continue;
         }
         throw err;
@@ -103,7 +103,7 @@ describe("broadcast groups", () => {
       broadcast: {
         "+1000": ["alfred", "missing"],
       },
-    } satisfies ClawdbotConfig);
+    } satisfies OpenClawConfig);
 
     const sendMedia = vi.fn();
     const reply = vi.fn().mockResolvedValue(undefined);

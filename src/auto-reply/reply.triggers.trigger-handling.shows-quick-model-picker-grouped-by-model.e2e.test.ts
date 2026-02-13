@@ -69,7 +69,7 @@ async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
       vi.mocked(abortEmbeddedPiRun).mockClear();
       return await fn(home);
     },
-    { prefix: "clawdbot-triggers-" },
+    { prefix: "openclaw-triggers-" },
   );
 }
 
@@ -78,7 +78,7 @@ function makeCfg(home: string) {
     agents: {
       defaults: {
         model: "anthropic/claude-opus-4-5",
-        workspace: join(home, "clawd"),
+        workspace: join(home, "openclaw"),
       },
     },
     channels: {
@@ -116,9 +116,9 @@ describe("trigger handling", () => {
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       const normalized = normalizeTestText(text ?? "");
       expect(normalized).toContain("Current: anthropic/claude-opus-4-5");
-      expect(normalized).toContain("Switch: /model <provider/model>");
-      expect(normalized).toContain("Browse: /models (providers) or /models <provider> (models)");
-      expect(normalized).toContain("More: /model status");
+      expect(normalized).toContain("/model <provider/model> to switch");
+      expect(normalized).toContain("Tap below to browse models");
+      expect(normalized).toContain("/model status for details");
       expect(normalized).not.toContain("reasoning");
       expect(normalized).not.toContain("image");
     });

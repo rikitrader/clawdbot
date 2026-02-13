@@ -2,11 +2,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-
-import { DEFAULT_BOOTSTRAP_FILENAME } from "../agents/workspace.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { runOnboardingWizard } from "./onboarding.js";
 import type { WizardPrompter } from "./prompts.js";
+import { DEFAULT_BOOTSTRAP_FILENAME } from "../agents/workspace.js";
+import { runOnboardingWizard } from "./onboarding.js";
 
 const setupChannels = vi.hoisted(() => vi.fn(async (cfg) => cfg));
 const setupSkills = vi.hoisted(() => vi.fn(async (cfg) => cfg));
@@ -20,6 +19,7 @@ const ensureSystemdUserLingerInteractive = vi.hoisted(() => vi.fn(async () => {}
 const isSystemdUserServiceAvailable = vi.hoisted(() => vi.fn(async () => true));
 const ensureControlUiAssetsBuilt = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 const runTui = vi.hoisted(() => vi.fn(async () => {}));
+const setupOnboardingShellCompletion = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("../commands/onboard-channels.js", () => ({
   setupChannels,
@@ -74,10 +74,14 @@ vi.mock("../tui/tui.js", () => ({
   runTui,
 }));
 
+vi.mock("./onboarding.completion.js", () => ({
+  setupOnboardingShellCompletion,
+}));
+
 describe("runOnboardingWizard", () => {
   it("exits when config is invalid", async () => {
     readConfigFileSnapshot.mockResolvedValueOnce({
-      path: "/tmp/.clawdbot/clawdbot.json",
+      path: "/tmp/.openclaw/openclaw.json",
       exists: true,
       raw: "{}",
       parsed: {},
@@ -174,11 +178,13 @@ describe("runOnboardingWizard", () => {
   it("launches TUI without auto-delivery when hatching", async () => {
     runTui.mockClear();
 
-    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-onboard-"));
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-onboard-"));
     await fs.writeFile(path.join(workspaceDir, DEFAULT_BOOTSTRAP_FILENAME), "{}");
 
     const select: WizardPrompter["select"] = vi.fn(async (opts) => {
-      if (opts.message === "How do you want to hatch your bot?") return "tui";
+      if (opts.message === "How do you want to hatch your bot?") {
+        return "tui";
+      }
       return "quickstart";
     });
 
@@ -230,10 +236,12 @@ describe("runOnboardingWizard", () => {
   it("offers TUI hatch even without BOOTSTRAP.md", async () => {
     runTui.mockClear();
 
-    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-onboard-"));
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-onboard-"));
 
     const select: WizardPrompter["select"] = vi.fn(async (opts) => {
-      if (opts.message === "How do you want to hatch your bot?") return "tui";
+      if (opts.message === "How do you want to hatch your bot?") {
+        return "tui";
+      }
       return "quickstart";
     });
 

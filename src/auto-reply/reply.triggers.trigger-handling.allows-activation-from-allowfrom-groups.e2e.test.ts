@@ -68,7 +68,7 @@ async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
       vi.mocked(abortEmbeddedPiRun).mockClear();
       return await fn(home);
     },
-    { prefix: "clawdbot-triggers-" },
+    { prefix: "openclaw-triggers-" },
   );
 }
 
@@ -77,7 +77,7 @@ function makeCfg(home: string) {
     agents: {
       defaults: {
         model: "anthropic/claude-opus-4-5",
-        workspace: join(home, "clawd"),
+        workspace: join(home, "openclaw"),
       },
     },
     channels: {
@@ -141,7 +141,7 @@ describe("trigger handling", () => {
           agents: {
             defaults: {
               model: "anthropic/claude-opus-4-5",
-              workspace: join(home, "clawd"),
+              workspace: join(home, "openclaw"),
             },
           },
           channels: {
@@ -161,7 +161,7 @@ describe("trigger handling", () => {
       expect(text).toBe("ok");
       expect(runEmbeddedPiAgent).toHaveBeenCalledOnce();
       const extra = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0]?.extraSystemPrompt ?? "";
-      expect(extra).toContain("Test Group");
+      expect(extra).toContain('"chat_type": "group"');
       expect(extra).toContain("Activation: always-on");
     });
   });
@@ -187,7 +187,7 @@ describe("trigger handling", () => {
           agents: {
             defaults: {
               model: "anthropic/claude-opus-4-5",
-              workspace: join(home, "clawd"),
+              workspace: join(home, "openclaw"),
             },
           },
           channels: {
@@ -196,7 +196,7 @@ describe("trigger handling", () => {
             },
           },
           session: {
-            store: join(tmpdir(), `clawdbot-session-test-${Date.now()}.json`),
+            store: join(tmpdir(), `openclaw-session-test-${Date.now()}.json`),
           },
         },
       );

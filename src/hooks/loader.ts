@@ -5,14 +5,14 @@
  * and from directory-based discovery (bundled, managed, workspace)
  */
 
-import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { registerInternalHook } from "./internal-hooks.js";
-import type { ClawdbotConfig } from "../config/config.js";
+import { pathToFileURL } from "node:url";
+import type { OpenClawConfig } from "../config/config.js";
 import type { InternalHookHandler } from "./internal-hooks.js";
-import { loadWorkspaceHookEntries } from "./workspace.js";
 import { resolveHookConfig } from "./config.js";
 import { shouldIncludeHook } from "./config.js";
+import { registerInternalHook } from "./internal-hooks.js";
+import { loadWorkspaceHookEntries } from "./workspace.js";
 
 /**
  * Load and register all hook handlers
@@ -21,7 +21,7 @@ import { shouldIncludeHook } from "./config.js";
  * 1. Directory-based discovery (bundled, managed, workspace)
  * 2. Legacy config handlers (backwards compatibility)
  *
- * @param cfg - Clawdbot configuration
+ * @param cfg - OpenClaw configuration
  * @param workspaceDir - Workspace directory for hook discovery
  * @returns Number of handlers successfully loaded
  *
@@ -34,8 +34,12 @@ import { shouldIncludeHook } from "./config.js";
  * ```
  */
 export async function loadInternalHooks(
-  cfg: ClawdbotConfig,
+  cfg: OpenClawConfig,
   workspaceDir: string,
+  opts?: {
+    managedHooksDir?: string;
+    bundledHooksDir?: string;
+  },
 ): Promise<number> {
   // Check if hooks are enabled
   if (!cfg.hooks?.internal?.enabled) {
@@ -46,7 +50,11 @@ export async function loadInternalHooks(
 
   // 1. Load hooks from directories (new system)
   try {
-    const hookEntries = loadWorkspaceHookEntries(workspaceDir, { config: cfg });
+    const hookEntries = loadWorkspaceHookEntries(workspaceDir, {
+      config: cfg,
+      managedHooksDir: opts?.managedHooksDir,
+      bundledHooksDir: opts?.bundledHooksDir,
+    });
 
     // Filter by eligibility
     const eligible = hookEntries.filter((entry) => shouldIncludeHook({ entry, config: cfg }));
@@ -66,7 +74,7 @@ export async function loadInternalHooks(
         const mod = (await import(cacheBustedUrl)) as Record<string, unknown>;
 
         // Get handler function (default or named export)
-        const exportName = entry.clawdbot?.export ?? "default";
+        const exportName = entry.metadata?.export ?? "default";
         const handler = mod[exportName];
 
         if (typeof handler !== "function") {
@@ -77,7 +85,7 @@ export async function loadInternalHooks(
         }
 
         // Register for all events listed in metadata
-        const events = entry.clawdbot?.events ?? [];
+        const events = entry.metadata?.events ?? [];
         if (events.length === 0) {
           console.warn(`Hook warning: Hook '${entry.hook.name}' has no events defined in metadata`);
           continue;

@@ -1,16 +1,19 @@
+import JSON5 from "json5";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-import JSON5 from "json5";
-
+import { isDeepStrictEqual } from "node:util";
+import type { OpenClawConfig, ConfigFileSnapshot, LegacyConfigIssue } from "./types.js";
+import { loadDotEnv } from "../infra/dotenv.js";
+import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import {
   loadShellEnvFallback,
   resolveShellEnvFallbackTimeoutMs,
   shouldDeferShellEnvFallback,
   shouldEnableShellEnvFallback,
 } from "../infra/shell-env.js";
+import { VERSION } from "../version.js";
 import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js";
 import {
   applyCompactionDefaults,
@@ -22,17 +25,23 @@ import {
   applySessionDefaults,
   applyTalkApiKey,
 } from "./defaults.js";
-import { VERSION } from "../version.js";
-import { MissingEnvVarError, resolveConfigEnvVars } from "./env-substitution.js";
+import {
+  MissingEnvVarError,
+  containsEnvVarReference,
+  resolveConfigEnvVars,
+} from "./env-substitution.js";
 import { collectConfigEnvVars } from "./env-vars.js";
 import { ConfigIncludeError, resolveConfigIncludes } from "./includes.js";
 import { findLegacyConfigIssues } from "./legacy.js";
+import { applyMergePatch } from "./merge-patch.js";
 import { normalizeConfigPaths } from "./normalize-paths.js";
-import { resolveConfigPath, resolveStateDir } from "./paths.js";
+import { resolveConfigPath, resolveDefaultConfigCandidates, resolveStateDir } from "./paths.js";
 import { applyConfigOverrides } from "./runtime-overrides.js";
-import type { ClawdbotConfig, ConfigFileSnapshot, LegacyConfigIssue } from "./types.js";
-import { validateConfigObjectWithPlugins } from "./validation.js";
-import { compareClawdbotVersions } from "./version.js";
+import {
+  validateConfigObjectRawWithPlugins,
+  validateConfigObjectWithPlugins,
+} from "./validation.js";
+import { compareOpenClawVersions } from "./version.js";
 
 // Re-export for backwards compatibility
 export { CircularIncludeError, ConfigIncludeError } from "./includes.js";
@@ -53,8 +62,8 @@ const SHELL_ENV_EXPECTED_KEYS = [
   "DISCORD_BOT_TOKEN",
   "SLACK_BOT_TOKEN",
   "SLACK_APP_TOKEN",
-  "CLAWDBOT_GATEWAY_TOKEN",
-  "CLAWDBOT_GATEWAY_PASSWORD",
+  "OPENCLAW_GATEWAY_TOKEN",
+  "OPENCLAW_GATEWAY_PASSWORD",
 ];
 
 const CONFIG_BACKUP_COUNT = 5;
@@ -75,21 +84,196 @@ export function resolveConfigSnapshotHash(snapshot: {
 }): string | null {
   if (typeof snapshot.hash === "string") {
     const trimmed = snapshot.hash.trim();
-    if (trimmed) return trimmed;
+    if (trimmed) {
+      return trimmed;
+    }
   }
-  if (typeof snapshot.raw !== "string") return null;
+  if (typeof snapshot.raw !== "string") {
+    return null;
+  }
   return hashConfigRaw(snapshot.raw);
 }
 
-function coerceConfig(value: unknown): ClawdbotConfig {
+function coerceConfig(value: unknown): OpenClawConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
-  return value as ClawdbotConfig;
+  return value as OpenClawConfig;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneUnknown<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function createMergePatch(base: unknown, target: unknown): unknown {
+  if (!isPlainObject(base) || !isPlainObject(target)) {
+    return cloneUnknown(target);
+  }
+
+  const patch: Record<string, unknown> = {};
+  const keys = new Set([...Object.keys(base), ...Object.keys(target)]);
+  for (const key of keys) {
+    const hasBase = key in base;
+    const hasTarget = key in target;
+    if (!hasTarget) {
+      patch[key] = null;
+      continue;
+    }
+    const targetValue = target[key];
+    if (!hasBase) {
+      patch[key] = cloneUnknown(targetValue);
+      continue;
+    }
+    const baseValue = base[key];
+    if (isPlainObject(baseValue) && isPlainObject(targetValue)) {
+      const childPatch = createMergePatch(baseValue, targetValue);
+      if (isPlainObject(childPatch) && Object.keys(childPatch).length === 0) {
+        continue;
+      }
+      patch[key] = childPatch;
+      continue;
+    }
+    if (!isDeepStrictEqual(baseValue, targetValue)) {
+      patch[key] = cloneUnknown(targetValue);
+    }
+  }
+  return patch;
+}
+
+function collectEnvRefPaths(value: unknown, path: string, output: Map<string, string>): void {
+  if (typeof value === "string") {
+    if (containsEnvVarReference(value)) {
+      output.set(path, value);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      collectEnvRefPaths(item, `${path}[${index}]`, output);
+    });
+    return;
+  }
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path ? `${path}.${key}` : key;
+      collectEnvRefPaths(child, childPath, output);
+    }
+  }
+}
+
+function collectChangedPaths(
+  base: unknown,
+  target: unknown,
+  path: string,
+  output: Set<string>,
+): void {
+  if (Array.isArray(base) && Array.isArray(target)) {
+    const max = Math.max(base.length, target.length);
+    for (let index = 0; index < max; index += 1) {
+      const childPath = path ? `${path}[${index}]` : `[${index}]`;
+      if (index >= base.length || index >= target.length) {
+        output.add(childPath);
+        continue;
+      }
+      collectChangedPaths(base[index], target[index], childPath, output);
+    }
+    return;
+  }
+  if (isPlainObject(base) && isPlainObject(target)) {
+    const keys = new Set([...Object.keys(base), ...Object.keys(target)]);
+    for (const key of keys) {
+      const childPath = path ? `${path}.${key}` : key;
+      const hasBase = key in base;
+      const hasTarget = key in target;
+      if (!hasTarget || !hasBase) {
+        output.add(childPath);
+        continue;
+      }
+      collectChangedPaths(base[key], target[key], childPath, output);
+    }
+    return;
+  }
+  if (!isDeepStrictEqual(base, target)) {
+    output.add(path);
+  }
+}
+
+function parentPath(value: string): string {
+  if (!value) {
+    return "";
+  }
+  if (value.endsWith("]")) {
+    const index = value.lastIndexOf("[");
+    return index > 0 ? value.slice(0, index) : "";
+  }
+  const index = value.lastIndexOf(".");
+  return index >= 0 ? value.slice(0, index) : "";
+}
+
+function isPathChanged(path: string, changedPaths: Set<string>): boolean {
+  if (changedPaths.has(path)) {
+    return true;
+  }
+  let current = parentPath(path);
+  while (current) {
+    if (changedPaths.has(current)) {
+      return true;
+    }
+    current = parentPath(current);
+  }
+  return changedPaths.has("");
+}
+
+function restoreEnvRefsFromMap(
+  value: unknown,
+  path: string,
+  envRefMap: Map<string, string>,
+  changedPaths: Set<string>,
+): unknown {
+  if (typeof value === "string") {
+    if (!isPathChanged(path, changedPaths)) {
+      const original = envRefMap.get(path);
+      if (original !== undefined) {
+        return original;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item, index) => {
+      const updated = restoreEnvRefsFromMap(item, `${path}[${index}]`, envRefMap, changedPaths);
+      if (updated !== item) {
+        changed = true;
+      }
+      return updated;
+    });
+    return changed ? next : value;
+  }
+  if (isPlainObject(value)) {
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path ? `${path}.${key}` : key;
+      const updated = restoreEnvRefsFromMap(child, childPath, envRefMap, changedPaths);
+      if (updated !== child) {
+        changed = true;
+      }
+      next[key] = updated;
+    }
+    return changed ? next : value;
+  }
+  return value;
 }
 
 async function rotateConfigBackups(configPath: string, ioFs: typeof fs.promises): Promise<void> {
-  if (CONFIG_BACKUP_COUNT <= 1) return;
+  if (CONFIG_BACKUP_COUNT <= 1) {
+    return;
+  }
   const backupBase = `${configPath}.bak`;
   const maxIndex = CONFIG_BACKUP_COUNT - 1;
   await ioFs.unlink(`${backupBase}.${maxIndex}`).catch(() => {
@@ -115,9 +299,13 @@ export type ConfigIoDeps = {
 };
 
 function warnOnConfigMiskeys(raw: unknown, logger: Pick<typeof console, "warn">): void {
-  if (!raw || typeof raw !== "object") return;
+  if (!raw || typeof raw !== "object") {
+    return;
+  }
   const gateway = (raw as Record<string, unknown>).gateway;
-  if (!gateway || typeof gateway !== "object") return;
+  if (!gateway || typeof gateway !== "object") {
+    return;
+  }
   if ("token" in (gateway as Record<string, unknown>)) {
     logger.warn(
       'Config uses "gateway.token". This key is ignored; use "gateway.auth.token" instead.',
@@ -125,7 +313,7 @@ function warnOnConfigMiskeys(raw: unknown, logger: Pick<typeof console, "warn">)
   }
 }
 
-function stampConfigVersion(cfg: ClawdbotConfig): ClawdbotConfig {
+function stampConfigVersion(cfg: OpenClawConfig): OpenClawConfig {
   const now = new Date().toISOString();
   return {
     ...cfg,
@@ -137,28 +325,36 @@ function stampConfigVersion(cfg: ClawdbotConfig): ClawdbotConfig {
   };
 }
 
-function warnIfConfigFromFuture(cfg: ClawdbotConfig, logger: Pick<typeof console, "warn">): void {
+function warnIfConfigFromFuture(cfg: OpenClawConfig, logger: Pick<typeof console, "warn">): void {
   const touched = cfg.meta?.lastTouchedVersion;
-  if (!touched) return;
-  const cmp = compareClawdbotVersions(VERSION, touched);
-  if (cmp === null) return;
+  if (!touched) {
+    return;
+  }
+  const cmp = compareOpenClawVersions(VERSION, touched);
+  if (cmp === null) {
+    return;
+  }
   if (cmp < 0) {
     logger.warn(
-      `Config was last written by a newer Clawdbot (${touched}); current version is ${VERSION}.`,
+      `Config was last written by a newer OpenClaw (${touched}); current version is ${VERSION}.`,
     );
   }
 }
 
-function applyConfigEnv(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): void {
+function applyConfigEnv(cfg: OpenClawConfig, env: NodeJS.ProcessEnv): void {
   const entries = collectConfigEnvVars(cfg);
   for (const [key, value] of Object.entries(entries)) {
-    if (env[key]?.trim()) continue;
+    if (env[key]?.trim()) {
+      continue;
+    }
     env[key] = value;
   }
 }
 
 function resolveConfigPathForDeps(deps: Required<ConfigIoDeps>): string {
-  if (deps.configPath) return deps.configPath;
+  if (deps.configPath) {
+    return deps.configPath;
+  }
   return resolveConfigPath(deps.env, resolveStateDir(deps.env, deps.homedir));
 }
 
@@ -167,10 +363,20 @@ function normalizeDeps(overrides: ConfigIoDeps = {}): Required<ConfigIoDeps> {
     fs: overrides.fs ?? fs,
     json5: overrides.json5 ?? JSON5,
     env: overrides.env ?? process.env,
-    homedir: overrides.homedir ?? os.homedir,
+    homedir:
+      overrides.homedir ?? (() => resolveRequiredHomeDir(overrides.env ?? process.env, os.homedir)),
     configPath: overrides.configPath ?? "",
     logger: overrides.logger ?? console,
   };
+}
+
+function maybeLoadDotEnvForConfig(env: NodeJS.ProcessEnv): void {
+  // Only hydrate dotenv for the real process env. Callers using injected env
+  // objects (tests/diagnostics) should stay isolated.
+  if (env !== process.env) {
+    return;
+  }
+  loadDotEnv({ quiet: true });
 }
 
 export function parseConfigJson5(
@@ -178,7 +384,7 @@ export function parseConfigJson5(
   json5: { parse: (value: string) => unknown } = JSON5,
 ): ParseConfigJson5Result {
   try {
-    return { ok: true, parsed: json5.parse(raw) as unknown };
+    return { ok: true, parsed: json5.parse(raw) };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
@@ -186,10 +392,16 @@ export function parseConfigJson5(
 
 export function createConfigIO(overrides: ConfigIoDeps = {}) {
   const deps = normalizeDeps(overrides);
-  const configPath = resolveConfigPathForDeps(deps);
+  const requestedConfigPath = resolveConfigPathForDeps(deps);
+  const candidatePaths = deps.configPath
+    ? [requestedConfigPath]
+    : resolveDefaultConfigCandidates(deps.env, deps.homedir);
+  const configPath =
+    candidatePaths.find((candidate) => deps.fs.existsSync(candidate)) ?? requestedConfigPath;
 
-  function loadConfig(): ClawdbotConfig {
+  function loadConfig(): OpenClawConfig {
     try {
+      maybeLoadDotEnvForConfig(deps.env);
       if (!deps.fs.existsSync(configPath)) {
         if (shouldEnableShellEnvFallback(deps.env) && !shouldDeferShellEnvFallback(deps.env)) {
           loadShellEnvFallback({
@@ -213,7 +425,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 
       // Apply config.env to process.env BEFORE substitution so ${VAR} can reference config-defined vars
       if (resolved && typeof resolved === "object" && "env" in resolved) {
-        applyConfigEnv(resolved as ClawdbotConfig, deps.env);
+        applyConfigEnv(resolved as OpenClawConfig, deps.env);
       }
 
       // Substitute ${VAR} env var references
@@ -221,8 +433,10 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 
       const resolvedConfig = substituted;
       warnOnConfigMiskeys(resolvedConfig, deps.logger);
-      if (typeof resolvedConfig !== "object" || resolvedConfig === null) return {};
-      const preValidationDuplicates = findDuplicateAgentDirs(resolvedConfig as ClawdbotConfig, {
+      if (typeof resolvedConfig !== "object" || resolvedConfig === null) {
+        return {};
+      }
+      const preValidationDuplicates = findDuplicateAgentDirs(resolvedConfig as OpenClawConfig, {
         env: deps.env,
         homedir: deps.homedir,
       });
@@ -298,6 +512,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
   }
 
   async function readConfigFileSnapshot(): Promise<ConfigFileSnapshot> {
+    maybeLoadDotEnvForConfig(deps.env);
     const exists = deps.fs.existsSync(configPath);
     if (!exists) {
       const hash = hashConfigRaw(null);
@@ -316,6 +531,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         exists: false,
         raw: null,
         parsed: {},
+        resolved: {},
         valid: true,
         config,
         hash,
@@ -335,6 +551,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           exists: true,
           raw,
           parsed: {},
+          resolved: {},
           valid: false,
           config: {},
           hash,
@@ -361,6 +578,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           exists: true,
           raw,
           parsed: parsedRes.parsed,
+          resolved: coerceConfig(parsedRes.parsed),
           valid: false,
           config: coerceConfig(parsedRes.parsed),
           hash,
@@ -372,7 +590,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 
       // Apply config.env to process.env BEFORE substitution so ${VAR} can reference config-defined vars
       if (resolved && typeof resolved === "object" && "env" in resolved) {
-        applyConfigEnv(resolved as ClawdbotConfig, deps.env);
+        applyConfigEnv(resolved as OpenClawConfig, deps.env);
       }
 
       // Substitute ${VAR} env var references
@@ -389,6 +607,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           exists: true,
           raw,
           parsed: parsedRes.parsed,
+          resolved: coerceConfig(resolved),
           valid: false,
           config: coerceConfig(resolved),
           hash,
@@ -408,6 +627,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           exists: true,
           raw,
           parsed: parsedRes.parsed,
+          resolved: coerceConfig(resolvedConfigRaw),
           valid: false,
           config: coerceConfig(resolvedConfigRaw),
           hash,
@@ -423,6 +643,9 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         exists: true,
         raw,
         parsed: parsedRes.parsed,
+        // Use resolvedConfigRaw (after $include and ${ENV} substitution but BEFORE runtime defaults)
+        // for config set/unset operations (issue #6070)
+        resolved: coerceConfig(resolvedConfigRaw),
         valid: true,
         config: normalizeConfigPaths(
           applyTalkApiKey(
@@ -444,6 +667,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         exists: true,
         raw: null,
         parsed: {},
+        resolved: {},
         valid: false,
         config: {},
         hash: hashConfigRaw(null),
@@ -454,9 +678,33 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
     }
   }
 
-  async function writeConfigFile(cfg: ClawdbotConfig) {
+  async function writeConfigFile(cfg: OpenClawConfig) {
     clearConfigCache();
-    const validated = validateConfigObjectWithPlugins(cfg);
+    let persistCandidate: unknown = cfg;
+    const snapshot = await readConfigFileSnapshot();
+    let envRefMap: Map<string, string> | null = null;
+    let changedPaths: Set<string> | null = null;
+    if (snapshot.valid && snapshot.exists) {
+      const patch = createMergePatch(snapshot.config, cfg);
+      persistCandidate = applyMergePatch(snapshot.resolved, patch);
+      try {
+        const resolvedIncludes = resolveConfigIncludes(snapshot.parsed, configPath, {
+          readFile: (candidate) => deps.fs.readFileSync(candidate, "utf-8"),
+          parseJson: (raw) => deps.json5.parse(raw),
+        });
+        const collected = new Map<string, string>();
+        collectEnvRefPaths(resolvedIncludes, "", collected);
+        if (collected.size > 0) {
+          envRefMap = collected;
+          changedPaths = new Set<string>();
+          collectChangedPaths(snapshot.config, cfg, "", changedPaths);
+        }
+      } catch {
+        envRefMap = null;
+      }
+    }
+
+    const validated = validateConfigObjectRawWithPlugins(persistCandidate);
     if (!validated.ok) {
       const issue = validated.issues[0];
       const pathLabel = issue?.path ? issue.path : "<root>";
@@ -470,9 +718,26 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
     }
     const dir = path.dirname(configPath);
     await deps.fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-    const json = JSON.stringify(applyModelDefaults(stampConfigVersion(cfg)), null, 2)
-      .trimEnd()
-      .concat("\n");
+    const outputConfig =
+      envRefMap && changedPaths
+        ? (restoreEnvRefsFromMap(validated.config, "", envRefMap, changedPaths) as OpenClawConfig)
+        : validated.config;
+    // Do NOT apply runtime defaults when writing — user config should only contain
+    // explicitly set values. Runtime defaults are applied when loading (issue #6070).
+    const json = JSON.stringify(stampConfigVersion(outputConfig), null, 2).trimEnd().concat("\n");
+    const nextHash = hashConfigRaw(json);
+    const previousHash = resolveConfigSnapshotHash(snapshot);
+    const changedPathCount = changedPaths?.size;
+    const logConfigOverwrite = () => {
+      if (!snapshot.exists) {
+        return;
+      }
+      const changeSummary =
+        typeof changedPathCount === "number" ? `, changedPaths=${changedPathCount}` : "";
+      deps.logger.warn(
+        `Config overwrite: ${configPath} (sha256 ${previousHash ?? "unknown"} -> ${nextHash}, backup=${configPath}.bak${changeSummary})`,
+      );
+    };
 
     const tmp = path.join(
       dir,
@@ -504,6 +769,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         await deps.fs.promises.unlink(tmp).catch(() => {
           // best-effort
         });
+        logConfigOverwrite();
         return;
       }
       await deps.fs.promises.unlink(tmp).catch(() => {
@@ -511,6 +777,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       });
       throw err;
     }
+    logConfigOverwrite();
   }
 
   return {
@@ -522,26 +789,34 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 }
 
 // NOTE: These wrappers intentionally do *not* cache the resolved config path at
-// module scope. `CLAWDBOT_CONFIG_PATH` (and friends) are expected to work even
+// module scope. `OPENCLAW_CONFIG_PATH` (and friends) are expected to work even
 // when set after the module has been imported (tests, one-off scripts, etc.).
 const DEFAULT_CONFIG_CACHE_MS = 200;
 let configCache: {
   configPath: string;
   expiresAt: number;
-  config: ClawdbotConfig;
+  config: OpenClawConfig;
 } | null = null;
 
 function resolveConfigCacheMs(env: NodeJS.ProcessEnv): number {
-  const raw = env.CLAWDBOT_CONFIG_CACHE_MS?.trim();
-  if (raw === "" || raw === "0") return 0;
-  if (!raw) return DEFAULT_CONFIG_CACHE_MS;
+  const raw = env.OPENCLAW_CONFIG_CACHE_MS?.trim();
+  if (raw === "" || raw === "0") {
+    return 0;
+  }
+  if (!raw) {
+    return DEFAULT_CONFIG_CACHE_MS;
+  }
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed)) return DEFAULT_CONFIG_CACHE_MS;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_CONFIG_CACHE_MS;
+  }
   return Math.max(0, parsed);
 }
 
 function shouldUseConfigCache(env: NodeJS.ProcessEnv): boolean {
-  if (env.CLAWDBOT_DISABLE_CONFIG_CACHE?.trim()) return false;
+  if (env.OPENCLAW_DISABLE_CONFIG_CACHE?.trim()) {
+    return false;
+  }
   return resolveConfigCacheMs(env) > 0;
 }
 
@@ -549,8 +824,9 @@ function clearConfigCache(): void {
   configCache = null;
 }
 
-export function loadConfig(): ClawdbotConfig {
-  const configPath = resolveConfigPath();
+export function loadConfig(): OpenClawConfig {
+  const io = createConfigIO();
+  const configPath = io.configPath;
   const now = Date.now();
   if (shouldUseConfigCache(process.env)) {
     const cached = configCache;
@@ -558,7 +834,7 @@ export function loadConfig(): ClawdbotConfig {
       return cached.config;
     }
   }
-  const config = createConfigIO({ configPath }).loadConfig();
+  const config = io.loadConfig();
   if (shouldUseConfigCache(process.env)) {
     const cacheMs = resolveConfigCacheMs(process.env);
     if (cacheMs > 0) {
@@ -573,12 +849,10 @@ export function loadConfig(): ClawdbotConfig {
 }
 
 export async function readConfigFileSnapshot(): Promise<ConfigFileSnapshot> {
-  return await createConfigIO({
-    configPath: resolveConfigPath(),
-  }).readConfigFileSnapshot();
+  return await createConfigIO().readConfigFileSnapshot();
 }
 
-export async function writeConfigFile(cfg: ClawdbotConfig): Promise<void> {
+export async function writeConfigFile(cfg: OpenClawConfig): Promise<void> {
   clearConfigCache();
-  await createConfigIO({ configPath: resolveConfigPath() }).writeConfigFile(cfg);
+  await createConfigIO().writeConfigFile(cfg);
 }

@@ -5,13 +5,34 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
-import { resolveConfigDir } from "../utils.js";
 import { resolvePinnedHostname } from "../infra/net/ssrf.js";
+import { resolveConfigDir } from "../utils.js";
 import { detectMime, extensionForMime } from "./mime.js";
 
 const resolveMediaDir = () => path.join(resolveConfigDir(), "media");
-const MAX_BYTES = 5 * 1024 * 1024; // 5MB default
+export const MEDIA_MAX_BYTES = 5 * 1024 * 1024; // 5MB default
+const MAX_BYTES = MEDIA_MAX_BYTES;
 const DEFAULT_TTL_MS = 2 * 60 * 1000; // 2 minutes
+type RequestImpl = typeof httpRequest;
+type ResolvePinnedHostnameImpl = typeof resolvePinnedHostname;
+
+const defaultHttpRequestImpl: RequestImpl = httpRequest;
+const defaultHttpsRequestImpl: RequestImpl = httpsRequest;
+const defaultResolvePinnedHostnameImpl: ResolvePinnedHostnameImpl = resolvePinnedHostname;
+
+let httpRequestImpl: RequestImpl = defaultHttpRequestImpl;
+let httpsRequestImpl: RequestImpl = defaultHttpsRequestImpl;
+let resolvePinnedHostnameImpl: ResolvePinnedHostnameImpl = defaultResolvePinnedHostnameImpl;
+
+export function setMediaStoreNetworkDepsForTest(deps?: {
+  httpRequest?: RequestImpl;
+  httpsRequest?: RequestImpl;
+  resolvePinnedHostname?: ResolvePinnedHostnameImpl;
+}): void {
+  httpRequestImpl = deps?.httpRequest ?? defaultHttpRequestImpl;
+  httpsRequestImpl = deps?.httpsRequest ?? defaultHttpsRequestImpl;
+  resolvePinnedHostnameImpl = deps?.resolvePinnedHostname ?? defaultResolvePinnedHostnameImpl;
+}
 
 /**
  * Sanitize a filename for cross-platform safety.
@@ -19,10 +40,11 @@ const DEFAULT_TTL_MS = 2 * 60 * 1000; // 2 minutes
  * Keeps: alphanumeric, dots, hyphens, underscores, Unicode letters/numbers.
  */
 function sanitizeFilename(name: string): string {
-  // Remove: < > : " / \ | ? * and control chars (U+0000-U+001F)
-  // oxlint-disable-next-line no-control-regex -- Intentionally matching control chars
-  const unsafe = /[<>:"/\\|?*\x00-\x1f]/g;
-  const sanitized = name.trim().replace(unsafe, "_").replace(/\s+/g, "_"); // Replace whitespace runs with underscore
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const sanitized = trimmed.replace(/[^\p{L}\p{N}._-]+/gu, "_");
   // Collapse multiple underscores, trim leading/trailing, limit length
   return sanitized.replace(/_+/g, "_").replace(/^_|_$/g, "").slice(0, 60);
 }
@@ -34,7 +56,9 @@ function sanitizeFilename(name: string): string {
  */
 export function extractOriginalFilename(filePath: string): string {
   const basename = path.basename(filePath);
-  if (!basename) return "file.bin"; // Fallback for empty input
+  if (!basename) {
+    return "file.bin";
+  } // Fallback for empty input
 
   const ext = path.extname(basename);
   const nameWithoutExt = path.basename(basename, ext);
@@ -56,7 +80,7 @@ export function getMediaDir() {
 
 export async function ensureMediaDir() {
   const mediaDir = resolveMediaDir();
-  await fs.mkdir(mediaDir, { recursive: true });
+  await fs.mkdir(mediaDir, { recursive: true, mode: 0o700 });
   return mediaDir;
 }
 
@@ -68,7 +92,9 @@ export async function cleanOldMedia(ttlMs = DEFAULT_TTL_MS) {
     entries.map(async (file) => {
       const full = path.join(mediaDir, file);
       const stat = await fs.stat(full).catch(() => null);
-      if (!stat) return;
+      if (!stat) {
+        return;
+      }
       if (now - stat.mtimeMs > ttlMs) {
         await fs.rm(full).catch(() => {});
       }
@@ -101,8 +127,8 @@ async function downloadToFile(
       reject(new Error(`Invalid URL protocol: ${parsedUrl.protocol}. Only HTTP/HTTPS allowed.`));
       return;
     }
-    const requestImpl = parsedUrl.protocol === "https:" ? httpsRequest : httpRequest;
-    resolvePinnedHostname(parsedUrl.hostname)
+    const requestImpl = parsedUrl.protocol === "https:" ? httpsRequestImpl : httpRequestImpl;
+    resolvePinnedHostnameImpl(parsedUrl.hostname)
       .then((pinned) => {
         const req = requestImpl(parsedUrl, { headers, lookup: pinned.lookup }, (res) => {
           // Follow redirects
@@ -123,7 +149,7 @@ async function downloadToFile(
           let total = 0;
           const sniffChunks: Buffer[] = [];
           let sniffLen = 0;
-          const out = createWriteStream(dest);
+          const out = createWriteStream(dest, { mode: 0o600 });
           res.on("data", (chunk) => {
             total += chunk.length;
             if (sniffLen < 16384) {
@@ -168,7 +194,7 @@ export async function saveMediaSource(
 ): Promise<SavedMedia> {
   const baseDir = resolveMediaDir();
   const dir = subdir ? path.join(baseDir, subdir) : baseDir;
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await cleanOldMedia();
   const baseId = crypto.randomUUID();
   if (looksLikeUrl(source)) {
@@ -198,7 +224,7 @@ export async function saveMediaSource(
   const ext = extensionForMime(mime) ?? path.extname(source);
   const id = ext ? `${baseId}${ext}` : baseId;
   const dest = path.join(dir, id);
-  await fs.writeFile(dest, buffer);
+  await fs.writeFile(dest, buffer, { mode: 0o600 });
   return { id, path: dest, size: stat.size, contentType: mime };
 }
 
@@ -213,7 +239,7 @@ export async function saveMediaBuffer(
     throw new Error(`Media exceeds ${(maxBytes / (1024 * 1024)).toFixed(0)}MB limit`);
   }
   const dir = path.join(resolveMediaDir(), subdir);
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const uuid = crypto.randomUUID();
   const headerExt = extensionForMime(contentType?.split(";")[0]?.trim() ?? undefined);
   const mime = await detectMime({ buffer, headerMime: contentType });
@@ -231,6 +257,6 @@ export async function saveMediaBuffer(
   }
 
   const dest = path.join(dir, id);
-  await fs.writeFile(dest, buffer);
+  await fs.writeFile(dest, buffer, { mode: 0o600 });
   return { id, path: dest, size: buffer.byteLength, contentType: mime };
 }

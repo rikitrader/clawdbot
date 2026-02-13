@@ -73,7 +73,7 @@ async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
       vi.mocked(abortEmbeddedPiRun).mockClear();
       return await fn(home);
     },
-    { prefix: "clawdbot-triggers-" },
+    { prefix: "openclaw-triggers-" },
   );
 }
 
@@ -82,7 +82,7 @@ function makeCfg(home: string) {
     agents: {
       defaults: {
         model: "anthropic/claude-opus-4-5",
-        workspace: join(home, "clawd"),
+        workspace: join(home, "openclaw"),
       },
     },
     channels: {
@@ -101,7 +101,7 @@ afterEach(() => {
 describe("trigger handling", () => {
   it("runs /compact as a gated command", async () => {
     await withTempHome(async (home) => {
-      const storePath = join(tmpdir(), `clawdbot-session-test-${Date.now()}.json`);
+      const storePath = join(tmpdir(), `openclaw-session-test-${Date.now()}.json`);
       vi.mocked(compactEmbeddedPiSession).mockResolvedValue({
         ok: true,
         compacted: true,
@@ -124,7 +124,7 @@ describe("trigger handling", () => {
           agents: {
             defaults: {
               model: "anthropic/claude-opus-4-5",
-              workspace: join(home, "clawd"),
+              workspace: join(home, "openclaw"),
             },
           },
           channels: {
@@ -148,6 +148,40 @@ describe("trigger handling", () => {
         To: "+2000",
       });
       expect(store[sessionKey]?.compactionCount).toBe(1);
+    });
+  });
+  it("runs /compact for non-default agents without transcript path validation failures", async () => {
+    await withTempHome(async (home) => {
+      vi.mocked(compactEmbeddedPiSession).mockClear();
+      vi.mocked(compactEmbeddedPiSession).mockResolvedValue({
+        ok: true,
+        compacted: true,
+        result: {
+          summary: "summary",
+          firstKeptEntryId: "x",
+          tokensBefore: 12000,
+        },
+      });
+
+      const res = await getReplyFromConfig(
+        {
+          Body: "/compact",
+          From: "+1004",
+          To: "+2000",
+          SessionKey: "agent:worker1:telegram:12345",
+          CommandAuthorized: true,
+        },
+        {},
+        makeCfg(home),
+      );
+
+      const text = Array.isArray(res) ? res[0]?.text : res?.text;
+      expect(text?.startsWith("⚙️ Compacted")).toBe(true);
+      expect(compactEmbeddedPiSession).toHaveBeenCalledOnce();
+      expect(vi.mocked(compactEmbeddedPiSession).mock.calls[0]?.[0]?.sessionFile).toContain(
+        join("agents", "worker1", "sessions"),
+      );
+      expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
   it("ignores think directives that only appear in the context wrapper", async () => {
