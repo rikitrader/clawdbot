@@ -24,7 +24,31 @@ export type SsrFPolicy = {
 };
 
 const PRIVATE_IPV6_PREFIXES = ["fe80:", "fec0:", "fc", "fd"];
-const BLOCKED_HOSTNAMES = new Set(["localhost", "metadata.google.internal"]);
+const BLOCKED_HOSTNAMES = new Set([
+  "localhost",
+  // GCP metadata
+  "metadata.google.internal",
+  "metadata.goog",
+  // AWS metadata (IP 169.254.169.254 already caught by isPrivateIpv4)
+  "metadata.aws.internal",
+  // Azure IMDS
+  "metadata.azure.com",
+  // Alibaba Cloud
+  "metadata.tencentyun.com",
+  // Oracle Cloud
+  "metadata.oraclecloud.com",
+  // DigitalOcean
+  "metadata.digitalocean.com",
+  // Common aliases attackers use
+  "instance-data",
+  "burpcollaborator.net",
+]);
+
+// IPs not in RFC1918/link-local but still dangerous (cloud wireservers, broadcast)
+const BLOCKED_IP_ADDRESSES = new Set([
+  "168.63.129.16", // Azure wireserver — not in any private range
+  "255.255.255.255", // Broadcast
+]);
 
 function normalizeHostname(hostname: string): string {
   const normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
@@ -138,7 +162,56 @@ function isPrivateIpv4(parts: number[]): boolean {
   if (octet1 === 100 && octet2 >= 64 && octet2 <= 127) {
     return true;
   }
+  // Multicast (224.0.0.0 – 239.255.255.255)
+  if (octet1 >= 224 && octet1 <= 239) {
+    return true;
+  }
+  // Broadcast
+  if (octet1 === 255) {
+    return true;
+  }
+  // 192.0.0.x (IANA special-purpose)
+  if (octet1 === 192 && octet2 === 0) {
+    return true;
+  }
+  // Explicit blocked IPs (e.g., Azure wireserver 168.63.129.16)
+  const asString = parts.join(".");
+  if (BLOCKED_IP_ADDRESSES.has(asString)) {
+    return true;
+  }
   return false;
+}
+
+/** Try to extract an embedded IPv4 from any IPv6 representation. */
+function extractIpv4FromIpv6(normalized: string): number[] | null {
+  // ::ffff:a.b.c.d or ::ffff:xxxx:xxxx (compressed form)
+  if (normalized.startsWith("::ffff:")) {
+    return parseIpv4FromMappedIpv6(normalized.slice("::ffff:".length));
+  }
+  // Expanded form: 0:0:0:0:0:ffff:a.b.c.d or 0:0:0:0:0:ffff:xxxx:xxxx
+  const ffffIdx = normalized.lastIndexOf("ffff:");
+  if (ffffIdx !== -1) {
+    const before = normalized.slice(0, ffffIdx).replace(/0/g, "").replace(/:/g, "");
+    if (before === "") {
+      return parseIpv4FromMappedIpv6(normalized.slice(ffffIdx + 5));
+    }
+  }
+  // IPv4-compatible (deprecated but functional): ::a.b.c.d
+  if (normalized.startsWith("::") && normalized.includes(".")) {
+    const ipv4Part = normalized.slice(2);
+    return parseIpv4(ipv4Part);
+  }
+  // Expanded IPv4-compatible: 0:0:0:0:0:0:a.b.c.d
+  if (normalized.includes(".")) {
+    const lastColon = normalized.lastIndexOf(":");
+    if (lastColon !== -1) {
+      const prefix = normalized.slice(0, lastColon).replace(/0/g, "").replace(/:/g, "");
+      if (prefix === "") {
+        return parseIpv4(normalized.slice(lastColon + 1));
+      }
+    }
+  }
+  return null;
 }
 
 export function isPrivateIpAddress(address: string): boolean {
@@ -150,15 +223,12 @@ export function isPrivateIpAddress(address: string): boolean {
     return false;
   }
 
-  if (normalized.startsWith("::ffff:")) {
-    const mapped = normalized.slice("::ffff:".length);
-    const ipv4 = parseIpv4FromMappedIpv6(mapped);
-    if (ipv4) {
-      return isPrivateIpv4(ipv4);
-    }
-  }
-
+  // Check for IPv4 embedded in any IPv6 representation
   if (normalized.includes(":")) {
+    const embeddedIpv4 = extractIpv4FromIpv6(normalized);
+    if (embeddedIpv4) {
+      return isPrivateIpv4(embeddedIpv4);
+    }
     if (normalized === "::" || normalized === "::1") {
       return true;
     }

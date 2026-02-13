@@ -339,10 +339,23 @@ export function attachGatewayWsMessageHandler(params: {
         const hasTokenAuth = Boolean(connectParams.auth?.token);
         const hasPasswordAuth = Boolean(connectParams.auth?.password);
         const hasSharedAuth = hasTokenAuth || hasPasswordAuth;
-        const allowInsecureControlUi =
+        let allowInsecureControlUi =
           isControlUi && configSnapshot.gateway?.controlUi?.allowInsecureAuth === true;
-        const disableControlUiDeviceAuth =
+        let disableControlUiDeviceAuth =
           isControlUi && configSnapshot.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true;
+        // ATOMICBOT HARDENING: Block dangerous flags in production
+        if (process.env.NODE_ENV === "production") {
+          if (allowInsecureControlUi) {
+            console.warn("[gateway] SECURITY: allowInsecureAuth blocked in production mode");
+            allowInsecureControlUi = false;
+          }
+          if (disableControlUiDeviceAuth) {
+            console.warn(
+              "[gateway] SECURITY: dangerouslyDisableDeviceAuth blocked in production mode",
+            );
+            disableControlUiDeviceAuth = false;
+          }
+        }
         const allowControlUiBypass = allowInsecureControlUi || disableControlUiDeviceAuth;
         const device = disableControlUiDeviceAuth ? null : deviceRaw;
 

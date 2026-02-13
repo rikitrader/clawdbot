@@ -41,6 +41,14 @@ function isLoopbackBind(bind: string | undefined): boolean {
 }
 
 function resolveProvider(config: VoiceCallConfig): VoiceCallProvider {
+  // Block skipSignatureVerification in production — only allow in development
+  if (config.skipSignatureVerification && process.env.NODE_ENV === "production") {
+    console.warn(
+      "[voice-call] SECURITY: skipSignatureVerification is not allowed in production. Ignoring.",
+    );
+    config = { ...config, skipSignatureVerification: false };
+  }
+
   const allowNgrokFreeTierLoopbackBypass =
     config.tunnel?.provider === "ngrok" &&
     isLoopbackBind(config.serve?.bind) &&

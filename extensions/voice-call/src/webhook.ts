@@ -171,7 +171,11 @@ export class VoiceCallWebhookServer {
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => {
         this.handleRequest(req, res, webhookPath).catch((err) => {
-          console.error("[voice-call] Webhook error:", err);
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            "[voice-call] Webhook error:",
+            msg.replace(/([A-Za-z0-9_\-]{20,})/g, "***"),
+          );
           res.statusCode = 500;
           res.end("Internal Server Error");
         });
@@ -289,7 +293,11 @@ export class VoiceCallWebhookServer {
       try {
         this.manager.processEvent(event);
       } catch (err) {
-        console.error(`[voice-call] Error processing event ${event.type}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[voice-call] Error processing event ${event.type}:`,
+          msg.replace(/([A-Za-z0-9_\-]{20,})/g, "***"),
+        );
       }
     }
 

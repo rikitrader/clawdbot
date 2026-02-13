@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { NextcloudTalkWebhookHeaders } from "./types.js";
 
 const SIGNATURE_HEADER = "x-nextcloud-talk-signature";
@@ -8,6 +8,7 @@ const BACKEND_HEADER = "x-nextcloud-talk-backend";
 /**
  * Verify the HMAC-SHA256 signature of an incoming webhook request.
  * Signature is calculated as: HMAC-SHA256(random + body, secret)
+ * Uses crypto.timingSafeEqual to prevent timing side-channel attacks.
  */
 export function verifyNextcloudTalkSignature(params: {
   signature: string;
@@ -24,14 +25,12 @@ export function verifyNextcloudTalkSignature(params: {
     .update(random + body)
     .digest("hex");
 
-  if (signature.length !== expected.length) {
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length) {
     return false;
   }
-  let result = 0;
-  for (let i = 0; i < signature.length; i++) {
-    result |= signature.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return result === 0;
+  return timingSafeEqual(sigBuf, expBuf);
 }
 
 /**
