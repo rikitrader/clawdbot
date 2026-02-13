@@ -10,7 +10,7 @@ struct AboutSettings: View {
         VStack(spacing: 8) {
             let appIcon = NSApplication.shared.applicationIconImage ?? CritterIconRenderer.makeIcon(blink: 0)
             Button {
-                if let url = URL(string: "https://github.com/openclaw/openclaw") {
+                if let url = URL(string: "https://github.com/rikitrader/clawdbot") {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
@@ -29,7 +29,7 @@ struct AboutSettings: View {
             }
 
             VStack(spacing: 3) {
-                Text("OpenClaw")
+                Text("ATOMICBOT.AI")
                     .font(.title3.bold())
                 Text("Version \(self.versionString)")
                     .foregroundStyle(.secondary)
@@ -38,7 +38,7 @@ struct AboutSettings: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Text("Menu bar companion for notifications, screenshots, and privileged agent actions.")
+                Text("Your AI agent companion — notifications, screenshots, voice, and privileged actions.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -49,10 +49,10 @@ struct AboutSettings: View {
                 AboutLinkRow(
                     icon: "chevron.left.slash.chevron.right",
                     title: "GitHub",
-                    url: "https://github.com/openclaw/openclaw")
-                AboutLinkRow(icon: "globe", title: "Website", url: "https://openclaw.ai")
-                AboutLinkRow(icon: "bird", title: "Twitter", url: "https://twitter.com/steipete")
-                AboutLinkRow(icon: "envelope", title: "Email", url: "mailto:peter@steipete.me")
+                    url: "https://github.com/rikitrader/clawdbot")
+                AboutLinkRow(icon: "globe", title: "Website", url: "https://atomicbot.ai")
+                AboutLinkRow(icon: "bird", title: "Twitter", url: "https://twitter.com/atomicbot_ai")
+                AboutLinkRow(icon: "envelope", title: "Email", url: "mailto:hello@atomicbot.ai")
             }
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
@@ -77,7 +77,7 @@ struct AboutSettings: View {
                 }
             }
 
-            Text("© 2025 Peter Steinberger — MIT License.")
+            Text("© 2026 Pandaverse OU — Built on OpenClaw (MIT License).")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)

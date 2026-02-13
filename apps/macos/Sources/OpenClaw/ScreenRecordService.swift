@@ -25,7 +25,7 @@ final class ScreenRecordService {
         }
     }
 
-    private let logger = Logger(subsystem: "ai.openclaw", category: "screenRecord")
+    private let logger = Logger(subsystem: "ai.atomicbot", category: "screenRecord")
 
     func record(
         screenIndex: Int?,

@@ -76,7 +76,7 @@ final class ControlChannel {
     private(set) var lastPingMs: Double?
     private(set) var authSourceLabel: String?
 
-    private let logger = Logger(subsystem: "ai.openclaw", category: "control")
+    private let logger = Logger(subsystem: "ai.atomicbot", category: "control")
 
     private var eventTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?

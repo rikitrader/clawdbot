@@ -36,7 +36,7 @@ actor CameraCaptureService {
         }
     }
 
-    private let logger = Logger(subsystem: "ai.openclaw", category: "camera")
+    private let logger = Logger(subsystem: "ai.atomicbot", category: "camera")
 
     func listDevices() -> [CameraDeviceInfo] {
         Self.availableCameras().map { device in

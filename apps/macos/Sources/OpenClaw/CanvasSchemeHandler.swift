@@ -3,7 +3,7 @@ import Foundation
 import OSLog
 import WebKit
 
-private let canvasLogger = Logger(subsystem: "ai.openclaw", category: "Canvas")
+private let canvasLogger = Logger(subsystem: "ai.atomicbot", category: "Canvas")
 
 final class CanvasSchemeHandler: NSObject, WKURLSchemeHandler {
     private let root: URL

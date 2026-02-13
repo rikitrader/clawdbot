@@ -9,7 +9,7 @@ import Darwin
 ///
 /// Uses `ssh -N -L` to forward the remote gateway ports to localhost.
 final class RemotePortTunnel {
-    private static let logger = Logger(subsystem: "ai.openclaw", category: "remote.tunnel")
+    private static let logger = Logger(subsystem: "ai.atomicbot", category: "remote.tunnel")
 
     let process: Process
     let localPort: UInt16?

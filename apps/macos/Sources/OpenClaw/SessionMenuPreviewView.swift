@@ -221,7 +221,7 @@ struct SessionMenuPreviewView: View {
 }
 
 enum SessionMenuPreviewLoader {
-    private static let logger = Logger(subsystem: "ai.openclaw", category: "SessionPreview")
+    private static let logger = Logger(subsystem: "ai.atomicbot", category: "SessionPreview")
     private static let previewTimeoutSeconds: Double = 4
     private static let cacheMaxAgeSeconds: TimeInterval = 30
     private static let previewMaxChars = 240

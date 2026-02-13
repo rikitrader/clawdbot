@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 
 enum NodeServiceManager {
-    private static let logger = Logger(subsystem: "ai.openclaw", category: "node.service")
+    private static let logger = Logger(subsystem: "ai.atomicbot", category: "node.service")
 
     static func start() async -> String? {
         let result = await self.runServiceCommandResult(
